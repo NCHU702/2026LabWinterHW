@@ -120,6 +120,7 @@ class StochasticRainDataset(Dataset):
             rain_frames.append(noisy_grid)
             
         # 3. 讀取 flood 原始資料（累積值）
+        # flood_paths 包含 [t, t+1, t+2, t+3] 共 4 個檔案
         flood_raw = []
         mask_frames = []
         for path in flood_paths:
@@ -129,15 +130,16 @@ class StochasticRainDataset(Dataset):
         
         # 4. 計算差值（增量）作為目標
         # 注意：原始 flood 資料是累積值，模型需要預測增量
+        # flood_raw[0] = t 時刻（基準）
+        # flood_raw[1] = t+1, flood_raw[2] = t+2, flood_raw[3] = t+3
         flood_frames = []
-        for i in range(len(flood_raw)):
-            if i == 0:
-                # t+1 的增量 = t+1 - t (假設 t=0)
-                flood_frames.append(flood_raw[0])
-            else:
-                # t+i 的增量 = t+i - t+(i-1)
-                diff = flood_raw[i] - flood_raw[i-1]
-                flood_frames.append(diff)
+        for i in range(1, len(flood_raw)):  # 從索引 1 開始（t+1, t+2, t+3）
+            # t+i 的增量 = flood[t+i] - flood[t+(i-1)]
+            diff = flood_raw[i] - flood_raw[i-1]
+            flood_frames.append(diff)
+        
+        # 只使用後 3 個時刻的 mask（對應 t+1, t+2, t+3）
+        mask_frames = mask_frames[1:]
             
         # 轉 Tensor
         input_tensor = torch.from_numpy(np.array(rain_frames)).unsqueeze(1)  # [9, 1, H, W]

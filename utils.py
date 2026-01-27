@@ -13,7 +13,6 @@ plt.rcParams['axes.unicode_minus'] = False  # 解決負號顯示問題
 
 """
 這裡放置通用的功能，例如「搜尋颱風資料」、「遮罩損失函數」和「可視化功能」。
-這樣可以讓主訓練程式保持乾淨。
 """
 
 def find_typhoon_data(root_dir):
@@ -62,9 +61,9 @@ def find_typhoon_data(root_dir):
                     break
             if missing: continue
                 
-            # 檢查 t+1 到 t+3 (共3幀)
+            # 檢查 t, t+1, t+2, t+3 (共4幀) - 需要 t 作為計算增量的基準
             flood_seq_paths = []
-            for offset in range(1, 4):
+            for offset in range(0, 4):
                 idx = t + offset
                 if idx in flood_map: flood_seq_paths.append(flood_map[idx])
                 else:
