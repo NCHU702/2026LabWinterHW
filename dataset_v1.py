@@ -6,11 +6,7 @@ from torch.utils.data import Dataset
 
 """
 這裡專注於資料的讀取、預處理（Masking）以及隨機擾動（Stochastic Perturbation）。
-
-重要說明：
-- Flood 資料為累積淹水深度（每個時間點包含之前的淹水）
-- Dataset 會自動計算差值（增量），作為模型的預測目標
-- 目標值 = 當前淹水深度 - 前一時間點淹水深度
+未考慮淹水累積關係
 """
 
 class StochasticRainDataset(Dataset):
@@ -113,31 +109,21 @@ class StochasticRainDataset(Dataset):
             rain_frames.append(grid)
             
         # 2. 未來 3 小時 (預報+擾動)
-        # 所有模式都加擾動以模擬預報不確定性
         for i in range(6, 9):
             grid, _ = self._read_csv(rain_paths[i])
-            noisy_grid = self._add_forecast_error(grid)
-            rain_frames.append(noisy_grid)
+            if self.config.get('mode', 'train') == 'train': # 只有訓練模式才加擾動
+                noisy_grid = self._add_forecast_error(grid)
+                rain_frames.append(noisy_grid)
+            else:
+                rain_frames.append(grid) # 驗證/推論不加額外擾動
             
-        # 3. 讀取 flood 原始資料（累積值）
-        flood_raw = []
+        # 3. 目標與遮罩
+        flood_frames = []
         mask_frames = []
         for path in flood_paths:
             grid, mask = self._read_csv(path)
-            flood_raw.append(grid)
+            flood_frames.append(grid)
             mask_frames.append(mask)
-        
-        # 4. 計算差值（增量）作為目標
-        # 注意：原始 flood 資料是累積值，模型需要預測增量
-        flood_frames = []
-        for i in range(len(flood_raw)):
-            if i == 0:
-                # t+1 的增量 = t+1 - t (假設 t=0)
-                flood_frames.append(flood_raw[0])
-            else:
-                # t+i 的增量 = t+i - t+(i-1)
-                diff = flood_raw[i] - flood_raw[i-1]
-                flood_frames.append(diff)
             
         # 轉 Tensor
         input_tensor = torch.from_numpy(np.array(rain_frames)).unsqueeze(1)  # [9, 1, H, W]
@@ -203,9 +189,9 @@ if __name__ == "__main__":
         print(f"   - 應為 [9, 1, H, W]: 9 個時間步，1 通道")
         print(f"   - 降雨範圍: [{input_data.min():.2f}, {input_data.max():.2f}]")
         
-        print(f"✅ 目標 (淹水增量) 維度: {target_data.shape}")
+        print(f"✅ 目標 (淹水) 維度: {target_data.shape}")
         print(f"   - 應為 [3, 1, H, W]: 3 個時間步，1 通道")
-        print(f"   - 淹水增量範圍: [{target_data.min():.2f}, {target_data.max():.2f}] (可能有負值)")
+        print(f"   - 淹水範圍: [{target_data.min():.2f}, {target_data.max():.2f}]")
         
         print(f"✅ 遮罩維度: {mask_data.shape}")
         print(f"   - 應為 [3, 1, H, W]")
@@ -305,15 +291,12 @@ if __name__ == "__main__":
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     ax.axis('off')
     
-    # 3 個淹水增量目標
+    # 3 個淹水目標
     for i in range(3):
         ax = axes[2, i + 1]
         flood_frame = target_data[i, 0].numpy()
-        # 增量可能有負值，使用對稱色階
-        vmin = min(flood_frame.min(), 0)
-        vmax = flood_frame.max()
-        im = ax.imshow(flood_frame, cmap=flood_cmap, vmin=vmin, vmax=vmax)
-        ax.set_title(f't+{i+1} (淹水增量)', fontsize=10, color='blue')
+        im = ax.imshow(flood_frame, cmap=flood_cmap, vmin=0, vmax=flood_frame.max())
+        ax.set_title(f't+{i+1} (淹水深度)', fontsize=10, color='blue')
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.axis('off')
     
@@ -373,58 +356,23 @@ if __name__ == "__main__":
     print(f"   ✅ 儲存: {fig_path}")
     plt.close()
     
-    # === 圖 4: 遮罩視覺化（增量 vs 累積） ===
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    fig.suptitle('淹水增量 vs 累積深度 + 有效區域遮罩', fontsize=16, fontweight='bold')
-    
-    # 計算累積淹水深度（用於顯示）
-    # 重新讀取原始累積值並進行相同的 padding
-    flood_cumulative = []
-    for path in train_dataset.sequences[sample_idx][1]:  # flood_paths
-        grid, mask_raw = train_dataset._read_csv(path)
-        # 轉為 tensor 並 padding（與 __getitem__ 相同）
-        grid_tensor = torch.from_numpy(grid).unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
-        h, w = grid.shape
-        pm = train_dataset.config.get('pad_multiple', 4)
-        target_h = ((h - 1) // pm + 1) * pm
-        target_w = ((w - 1) // pm + 1) * pm
-        pad_bottom = target_h - h
-        pad_right = target_w - w
-        grid_padded = F.pad(grid_tensor, (0, pad_right, 0, pad_bottom), mode='constant', value=0)
-        flood_cumulative.append(grid_padded[0, 0].numpy())
+    # === 圖 4: 遮罩視覺化 ===
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle('淹水深度 + 有效區域遮罩', fontsize=16, fontweight='bold')
     
     for i in range(3):
-        # 第一行：增量
-        ax = axes[0, i]
+        ax = axes[i]
         flood_frame = target_data[i, 0].numpy()
         mask_frame = mask_data[i, 0].numpy()
         
-        # 顯示淹水增量（可能有負值）
-        vmin = min(flood_frame.min(), 0)
-        vmax = flood_frame.max()
-        im = ax.imshow(flood_frame, cmap='RdBu_r', vmin=-max(abs(vmin), abs(vmax)), vmax=max(abs(vmin), abs(vmax)))
+        # 顯示淹水深度
+        im = ax.imshow(flood_frame, cmap=flood_cmap, vmin=0, vmax=flood_frame.max())
         
         # 疊加遮罩邊界
         ax.contour(mask_frame, levels=[0.5], colors='black', linewidths=1, alpha=0.5)
         
         valid_ratio = (mask_frame.sum() / mask_frame.size) * 100
-        increment_mean = flood_frame[mask_frame > 0.5].mean() if (mask_frame > 0.5).any() else 0
-        ax.set_title(f't+{i+1} 增量 (mean={increment_mean:.4f}m)', fontsize=11, fontweight='bold')
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='增量 (m)')
-        ax.axis('off')
-        
-        # 第二行：累積值（絕對深度）
-        ax = axes[1, i]
-        cumulative_frame = flood_cumulative[i]
-        
-        # 顯示累積淹水深度
-        im = ax.imshow(cumulative_frame, cmap=flood_cmap, vmin=0, vmax=max(cumulative_frame.max(), 0.01))
-        
-        # 疊加遮罩邊界
-        ax.contour(mask_frame, levels=[0.5], colors='black', linewidths=1, alpha=0.5)
-        
-        cumulative_mean = cumulative_frame[mask_frame > 0.5].mean() if (mask_frame > 0.5).any() else 0
-        ax.set_title(f't+{i+1} 累積深度 (mean={cumulative_mean:.4f}m)', fontsize=11)
+        ax.set_title(f't+{i+1} 淹水 (有效區域: {valid_ratio:.1f}%)', fontsize=11)
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label='深度 (m)')
         ax.axis('off')
     
@@ -449,14 +397,14 @@ if __name__ == "__main__":
     ax.legend()
     ax.grid(alpha=0.3)
     
-    # 淹水增量分布
+    # 淹水深度分布
     ax = axes[0, 1]
     flood_all = target_data[:, 0].numpy().flatten()
-    flood_valid = flood_all[np.abs(flood_all) > 0.001]  # 排除接近零的值
+    flood_valid = flood_all[flood_all > 0]
     ax.hist(flood_valid, bins=50, color='red', alpha=0.7)
-    ax.set_xlabel('淹水增量 (m)', fontsize=10)
+    ax.set_xlabel('淹水深度 (m)', fontsize=10)
     ax.set_ylabel('頻率', fontsize=10)
-    ax.set_title(f'淹水增量分布 (含正負值)', fontsize=12)
+    ax.set_title(f'淹水深度分布 (非零值)', fontsize=12)
     ax.grid(alpha=0.3)
     
     # 時間序列趨勢
@@ -492,8 +440,8 @@ if __name__ == "__main__":
     plt.close()
     
     print(f"\n✅ 所有視覺化圖片已儲存至: {vis_dir}/")
-    print("   - full_sequence.png: 完整時間序列 (降雨 + 淹水增量)")
-    print("   - train_vs_val.png: 訓練 vs 驗證模式 (擾動效果)")
-    print("   - perturbation_diff.png: 擾動差異熱圖")
-    print("   - flood_with_mask.png: 淹水增量 vs 累積深度 (上下對比)")
-    print("   - statistics.png: 統計分析 (含增量分布)")
+    print("   - full_sequence.png: 完整時間序列")
+    print("   - train_vs_val.png: 訓練 vs 驗證模式")
+    print("   - perturbation_diff.png: 擾動差異")
+    print("   - flood_with_mask.png: 淹水 + 遮罩")
+    print("   - statistics.png: 統計分析")
