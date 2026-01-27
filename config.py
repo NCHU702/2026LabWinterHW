@@ -15,7 +15,7 @@ CONFIG = {
     'output_seq_len': 3,     # 預測未來 3 小時
     
     # 訓練參數
-    'batch_size': 2,
+    'batch_size': 2,    # 一個batch差不多3.5GB VRAM
     'learning_rate': 1e-4,
     'num_epochs': 64,
     
