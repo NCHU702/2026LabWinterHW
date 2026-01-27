@@ -17,7 +17,7 @@ import json
 from config import CONFIG
 from dataset import StochasticRainDataset
 from model import HydroNetRainOnly
-from utils import find_typhoon_data, masked_mse_loss
+from utils import find_typhoon_data, masked_mse_loss, weighted_flood_loss
 
 
 # 從 CONFIG 字典取出設定值
@@ -233,6 +233,8 @@ def train():
     history = {
         'train_loss': [],
         'val_loss': [],
+        'val_mae': [],
+        'val_flood_mse': [],
         'learning_rate': [],
         'epoch_time': []
     }
@@ -266,7 +268,7 @@ def train():
             
             with torch.amp.autocast('cuda'):
                 pred = model(rain_input)
-                loss = masked_mse_loss(pred, flood_target, mask)
+                loss = weighted_flood_loss(pred, flood_target, mask, flood_weight=flood_weight)
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -276,7 +278,7 @@ def train():
             
             train_loss += loss.item()
             
-            if (batch_idx + 1) % 50 == 0:
+            if (batch_idx + 1) % 10 == 0:
                 print(f"  Epoch {epoch}, Batch {batch_idx + 1}/{len(train_loader)}, "
                       f"Loss: {loss.item():.6f}")
         
@@ -289,6 +291,10 @@ def train():
         val_target_for_vis = None
         val_mask_for_vis = None
         
+        # 額外指標追蹤
+        val_mae = 0.0
+        val_flood_mse = 0.0  # 只計算有淹水變化區域的 MSE
+        
         with torch.no_grad():
             for batch_idx, (rain_input, flood_target, mask) in enumerate(val_loader):
                 rain_input = rain_input.to(device, non_blocking=True)
@@ -297,9 +303,19 @@ def train():
                 
                 with torch.amp.autocast('cuda'):
                     pred = model(rain_input)
-                    loss = masked_mse_loss(pred, flood_target, mask)
+                    loss = weighted_flood_loss(pred, flood_target, mask, flood_weight=flood_weight)
                 
                 val_loss += loss.item()
+                
+                # 計算 MAE
+                mae = (torch.abs(pred - flood_target) * mask).sum() / (mask.sum() + 1e-6)
+                val_mae += mae.item()
+                
+                # 計算淹水區域 MSE
+                flood_mask = (torch.abs(flood_target) > 0.001).float() * mask
+                if flood_mask.sum() > 0:
+                    flood_mse = ((pred - flood_target) ** 2 * flood_mask).sum() / (flood_mask.sum() + 1e-6)
+                    val_flood_mse += flood_mse.item()
                 
                 # 保存第一個批次用於視覺化
                 if batch_idx == 0:
@@ -308,6 +324,8 @@ def train():
                     val_mask_for_vis = mask
         
         val_loss /= len(val_loader)
+        val_mae /= len(val_loader)
+        val_flood_mse /= len(val_loader)
         
         # 更新學習率
         scheduler.step(val_loss)
@@ -320,6 +338,8 @@ def train():
         # 記錄訓練歷史
         history['train_loss'].append(train_loss)
         history['val_loss'].append(val_loss)
+        history['val_mae'].append(val_mae)
+        history['val_flood_mse'].append(val_flood_mse)
         history['learning_rate'].append(current_lr)
         history['epoch_time'].append(epoch_time)
         
@@ -338,7 +358,7 @@ def train():
         # 輸出訓練資訊
         print(f"\nEpoch {epoch}/{epochs}")
         print(f"  Train Loss: {train_loss:.6f}")
-        print(f"  Val Loss:   {val_loss:.6f}")
+        print(f"  Val Loss:   {val_loss:.6f} | MAE: {val_mae:.6f} | Flood MSE: {val_flood_mse:.6f}")
         print(f"  LR: {current_lr:.2e}")
         print(f"  Epoch 耗時: {format_time(epoch_time)} | "
               f"已訓練: {format_time(elapsed_total)} | "

@@ -88,6 +88,38 @@ def masked_mse_loss(pred, target, mask):
     return loss
 
 
+def weighted_flood_loss(pred, target, mask, flood_weight=10.0, threshold=0.001):
+    """
+    加權損失函數：對有淹水變化的區域給予更高權重
+    
+    Args:
+        pred: 預測值
+        target: 目標值 (淹水增量)
+        mask: 有效區域遮罩
+        flood_weight: 淹水區域的權重倍數
+        threshold: 判定有淹水變化的閾值
+    
+    Returns:
+        加權 MSE 損失
+    """
+    # 基礎誤差
+    diff = pred - target
+    squared_err = diff ** 2
+    
+    # 計算權重：有變化的區域權重更高
+    # 使用 target 的絕對值來判斷是否有顯著變化
+    weight = torch.ones_like(target)
+    significant_change = (torch.abs(target) > threshold).float()
+    weight = weight + (flood_weight - 1.0) * significant_change
+    
+    # 應用遮罩和權重
+    weighted_err = squared_err * mask * weight
+    total_weight = (mask * weight).sum() + 1e-6
+    
+    loss = weighted_err.sum() / total_weight
+    return loss
+
+
 def load_csv_data(csv_path):
     """
     讀取 CSV 檔案並處理缺失值

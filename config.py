@@ -7,7 +7,8 @@ import os
 
 CONFIG = {
     # 路徑設定
-    'train_data_dir': 'train_data',  
+    'train_data_dir': 'train_data',
+    'val_data_dir': 'val_data',
     'save_dir': 'checkpoints',
     
     # 序列長度
@@ -17,7 +18,12 @@ CONFIG = {
     # 訓練參數
     'batch_size': 2,    # 一個batch差不多3.5GB VRAM
     'learning_rate': 1e-4,
+    'weight_decay': 1e-5,
     'num_epochs': 64,
+    'early_stopping_patience': 10,
+    
+    # 損失函數參數
+    'flood_weight': 20.0,    # 淹水區域的權重倍數 (越大越關注淹水區)
     
     # 資料處理
     'pad_multiple': 4,       # 尺寸需為 4 的倍數
