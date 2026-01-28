@@ -6,7 +6,6 @@
 
 - Python 3.10+
 - NVIDIA GPU (建議 8GB+ VRAM)
-- CUDA 11.8
 
 ## 安裝步驟
 
@@ -34,10 +33,6 @@ source .venv/bin/activate
 ```
 
 ### 3. 安裝 PyTorch (CUDA 11.8)
-
-```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-```
 
 ### 4. 安裝其他依賴
 
