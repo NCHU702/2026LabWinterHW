@@ -88,15 +88,19 @@ def masked_mse_loss(pred, target, mask):
     return loss
 
 
-def weighted_flood_loss(pred, target, mask, flood_weight=10.0, threshold=0.001):
+def weighted_flood_loss(pred, target, mask, flood_weight=10.0, threshold=0.01):
     """
     加權損失函數：對有淹水變化的區域給予更高權重
+    
+    改進版本：
+    1. 根據淹水強度動態調整權重 (淹水越嚴重權重越高)
+    2. 對誤差大的區域額外懲罰
     
     Args:
         pred: 預測值
         target: 目標值 (淹水增量)
         mask: 有效區域遮罩
-        flood_weight: 淹水區域的權重倍數
+        flood_weight: 淹水區域的基礎權重倍數
         threshold: 判定有淹水變化的閾值
     
     Returns:
@@ -106,11 +110,20 @@ def weighted_flood_loss(pred, target, mask, flood_weight=10.0, threshold=0.001):
     diff = pred - target
     squared_err = diff ** 2
     
-    # 計算權重：有變化的區域權重更高
-    # 使用 target 的絕對值來判斷是否有顯著變化
+    # 動態權重：基於目標值的絕對值
+    # 有變化的區域權重 = 1 + (flood_weight - 1) * sigmoid(|target| * scale)
+    # 這樣淹水越嚴重，權重越高
+    abs_target = torch.abs(target)
+    
+    # 基礎權重為 1，有變化的區域提升權重
+    significant_change = (abs_target > threshold).float()
+    
+    # 強度權重：淹水越多權重越高 (0.1m 的變化比 0.01m 更重要)
+    intensity_weight = 1.0 + abs_target * 10.0  # 0.1m -> 2x, 0.2m -> 3x
+    
+    # 總權重 = 基礎權重 + 淹水權重 * 強度
     weight = torch.ones_like(target)
-    significant_change = (torch.abs(target) > threshold).float()
-    weight = weight + (flood_weight - 1.0) * significant_change
+    weight = weight + (flood_weight - 1.0) * significant_change * intensity_weight
     
     # 應用遮罩和權重
     weighted_err = squared_err * mask * weight

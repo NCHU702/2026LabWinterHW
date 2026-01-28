@@ -23,7 +23,8 @@ CONFIG = {
     'early_stopping_patience': 10,
     
     # 損失函數參數
-    'flood_weight': 20.0,    # 淹水區域的權重倍數 (越大越關注淹水區)
+    'flood_weight': 50.0,    # 淹水區域的權重倍數 (越大越關注淹水區)
+    'target_scale': 10.0,    # 目標值縮放因子 (放大目標值讓模型更容易學習)
     
     # 資料處理
     'pad_multiple': 4,       # 尺寸需為 4 的倍數

@@ -133,9 +133,12 @@ class StochasticRainDataset(Dataset):
         # flood_raw[0] = t 時刻（基準）
         # flood_raw[1] = t+1, flood_raw[2] = t+2, flood_raw[3] = t+3
         flood_frames = []
+        target_scale = self.config.get('target_scale', 1.0)  # 目標值縮放因子
         for i in range(1, len(flood_raw)):  # 從索引 1 開始（t+1, t+2, t+3）
             # t+i 的增量 = flood[t+i] - flood[t+(i-1)]
             diff = flood_raw[i] - flood_raw[i-1]
+            # 縮放目標值讓模型更容易學習
+            diff = diff * target_scale
             flood_frames.append(diff)
         
         # 只使用後 3 個時刻的 mask（對應 t+1, t+2, t+3）

@@ -311,8 +311,10 @@ def train():
                 mae = (torch.abs(pred - flood_target) * mask).sum() / (mask.sum() + 1e-6)
                 val_mae += mae.item()
                 
-                # 計算淹水區域 MSE
-                flood_mask = (torch.abs(flood_target) > 0.001).float() * mask
+                # 計算淹水區域 MSE (閾值需要配合 target_scale)
+                target_scale = CONFIG.get('target_scale', 1.0)
+                flood_threshold = 0.001 * target_scale  # 縮放後的閾值
+                flood_mask = (torch.abs(flood_target) > flood_threshold).float() * mask
                 if flood_mask.sum() > 0:
                     flood_mse = ((pred - flood_target) ** 2 * flood_mask).sum() / (flood_mask.sum() + 1e-6)
                     val_flood_mse += flood_mse.item()
