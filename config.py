@@ -16,7 +16,7 @@ CONFIG = {
     'output_seq_len': 3,     # 預測未來 3 小時
     
     # 訓練參數
-    'batch_size': 2,    # 一個batch差不多3.5GB VRAM
+    'batch_size': 2,    # 一個batch差不多4.5GB VRAM
     'learning_rate': 1e-4,
     'weight_decay': 1e-5,
     'num_epochs': 64,
@@ -27,7 +27,7 @@ CONFIG = {
     'target_scale': 10.0,    # 目標值縮放因子 (放大目標值讓模型更容易學習)
     
     # 資料處理
-    'pad_multiple': 4,       # 尺寸需為 4 的倍數
+    'pad_multiple': 8,       # 尺寸需為 8 的倍數 (3層MaxPool: 2^3=8)
     
     # 硬體
     'device': torch.device("cuda" if torch.cuda.is_available() else "cpu")

@@ -108,12 +108,21 @@ class HydroNetRainOnly(nn.Module):
         self.lstm2 = ConvLSTMCell(32, 32, 3, True)
         self.pool2 = nn.MaxPool2d(2)
         
+        # Encoder Layer 3: Conv -> LeakyReLU -> ConvLSTM -> MaxPool
+        self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+        self.act3 = nn.LeakyReLU(0.2)
+        self.lstm3 = ConvLSTMCell(64, 64, 3, True)
+        self.pool3 = nn.MaxPool2d(2)
+        
         # Decoder
-        self.dec1 = nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1)
+        self.dec1 = nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1)
         self.dec1_act = nn.LeakyReLU(0.2)
         
-        self.dec2 = nn.ConvTranspose2d(16, 8, 3, stride=2, padding=1, output_padding=1)
+        self.dec2 = nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1)
         self.dec2_act = nn.LeakyReLU(0.2)
+        
+        self.dec3 = nn.ConvTranspose2d(16, 8, 3, stride=2, padding=1, output_padding=1)
+        self.dec3_act = nn.LeakyReLU(0.2)
         
         # Output: 單時間步的淹水增量預測
         self.final = nn.Conv2d(8, 1, 3, padding=1)
@@ -124,12 +133,13 @@ class HydroNetRainOnly(nn.Module):
         # seq_len = 9: 過去6小時觀測 + 未來3小時預報
         b, seq, c, h, w = x.size()
         
-        # 初始化兩層 LSTM 狀態
+        # 初始化三層 LSTM 狀態
         h1, c1 = self.lstm1.init_hidden(batch_size=b, image_size=(h, w))
         h2, c2 = self.lstm2.init_hidden(batch_size=b, image_size=(h//2, w//2))
+        h3, c3 = self.lstm3.init_hidden(batch_size=b, image_size=(h//4, w//4))
         
-        # 保存 Block2 在未來 3 個時間步的輸出（用於預測）
-        h2_futures = []
+        # 保存 Block3 在未來 3 個時間步的輸出（用於預測）
+        h3_futures = []
         
         # 逐時間步處理，信息流經所有層
         for t in range(seq):
@@ -149,23 +159,32 @@ class HydroNetRainOnly(nn.Module):
             # MaxPool
             pooled2 = self.pool2(h2)  # (b, 32, h//4, w//4)
             
-            # 保存未來 3 個時間步的 Block2 輸出（t=6,7,8 對應 t+1,t+2,t+3）
+            # ===== Encoder Layer 3 =====
+            # Conv -> LeakyReLU (使用 Layer 2 當前時間步的輸出)
+            conv_out3 = self.act3(self.conv3(pooled2))
+            # ConvLSTM - 更新狀態
+            h3, c3 = self.lstm3(conv_out3, (h3, c3))
+            # MaxPool
+            pooled3 = self.pool3(h3)  # (b, 64, h//8, w//8)
+            
+            # 保存未來 3 個時間步的 Block3 輸出（t=6,7,8 對應 t+1,t+2,t+3）
             # 保存 MaxPool 後的結果，準備送入 Decoder
             if t >= 6:
-                h2_futures.append(pooled2)
+                h3_futures.append(pooled3)
         
         # Decoder: 對每個未來時間步分別解碼
         predictions = []
         for t in range(self.output_steps):  # t+1, t+2, t+3
-            # 使用對應時間步的 Block2 輸出（已經過 MaxPool）
-            pooled2_t = h2_futures[t]  # (b, 32, h//4, w//4)
+            # 使用對應時間步的 Block3 輸出（已經過 MaxPool）
+            pooled3_t = h3_futures[t]  # (b, 64, h//8, w//8)
             
             # 上採樣回原始解析度
-            d1 = self.dec1_act(self.dec1(pooled2_t))  # (b, 16, h//2, w//2)
-            d2 = self.dec2_act(self.dec2(d1))         # (b, 8, h, w)
+            d1 = self.dec1_act(self.dec1(pooled3_t))  # (b, 32, h//4, w//4)
+            d2 = self.dec2_act(self.dec2(d1))         # (b, 16, h//2, w//2)
+            d3 = self.dec3_act(self.dec3(d2))         # (b, 8, h, w)
             
             # 預測該時間步的淹水增量（可正可負，允許水退）
-            pred = self.final(d2)  # (b, 1, h, w)
+            pred = self.final(d3)  # (b, 1, h, w)
             predictions.append(pred)
         
         # 堆疊所有時間步的預測
