@@ -47,60 +47,85 @@ def init_weights(m):
         nn.init.constant_(m.bias, 0)
 
 
-def save_validation_comparison(pred, target, mask, epoch, save_dir, sample_idx=0):
+def save_validation_comparison(all_preds, all_targets, all_masks, epoch, save_dir):
     """
-    保存驗證階段的預測與真實值比較圖
+    保存驗證階段的預測與真實值比較圖 (第一筆、中間、最後一筆)
     
     Args:
-        pred: 預測值 [B, 3, 1, H, W] - 對應 t+1, t+2, t+3
-        target: 真實值 [B, 3, 1, H, W]
-        mask: 遮罩 [B, 3, 1, H, W]
+        all_preds: 所有預測值列表，每個元素 [B, 3, 1, H, W]
+        all_targets: 所有真實值列表
+        all_masks: 所有遮罩列表
         epoch: 當前 epoch
         save_dir: 保存目錄
-        sample_idx: 要視覺化的樣本索引
     """
     os.makedirs(save_dir, exist_ok=True)
     
-    # 取出指定樣本，轉為 numpy
-    pred_np = pred[sample_idx].detach().cpu().numpy()      # [3, 1, H, W]
-    target_np = target[sample_idx].detach().cpu().numpy()  # [3, 1, H, W]
-    mask_np = mask[sample_idx].detach().cpu().numpy()      # [3, 1, H, W]
+    # 合併所有 batch 的資料
+    preds = torch.cat(all_preds, dim=0)    # [N, 3, 1, H, W]
+    targets = torch.cat(all_targets, dim=0)
+    masks = torch.cat(all_masks, dim=0)
     
-    # 創建 2x3 的圖表：上排預測，下排真實值
-    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    n_samples = preds.shape[0]
     
-    titles = ['t+1', 't+2', 't+3']
+    # 選擇第一筆、中間、最後一筆
+    sample_indices = [0, n_samples // 2, n_samples - 1]
+    sample_names = ['first', 'middle', 'last']
     
-    # 計算統一的顏色範圍
-    all_values = np.concatenate([pred_np.flatten(), target_np.flatten()])
-    vmin = np.percentile(all_values, 1)
-    vmax = np.percentile(all_values, 99)
+    # 還原 target_scale 縮放
+    target_scale = CONFIG.get('target_scale', 1.0)
     
-    for i in range(3):
-        # 應用遮罩
-        pred_masked = np.ma.masked_where(mask_np[i, 0] == 0, pred_np[i, 0])
-        target_masked = np.ma.masked_where(mask_np[i, 0] == 0, target_np[i, 0])
+    for sample_idx, sample_name in zip(sample_indices, sample_names):
+        # 取出指定樣本，轉為 numpy
+        pred_np = preds[sample_idx].detach().cpu().numpy() / target_scale      # [3, 1, H, W]
+        target_np = targets[sample_idx].detach().cpu().numpy() / target_scale  # [3, 1, H, W]
+        mask_np = masks[sample_idx].detach().cpu().numpy()                     # [3, 1, H, W]
         
-        # 上排：預測值
-        im1 = axes[0, i].imshow(pred_masked, cmap='Blues', vmin=vmin, vmax=vmax)
-        axes[0, i].set_title(f'Prediction {titles[i]}')
-        axes[0, i].axis('off')
-        plt.colorbar(im1, ax=axes[0, i], fraction=0.046, pad=0.04)
+        # 創建 2x3 的圖表：上排預測，下排真實值
+        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         
-        # 下排：真實值
-        im2 = axes[1, i].imshow(target_masked, cmap='Blues', vmin=vmin, vmax=vmax)
-        axes[1, i].set_title(f'Ground Truth {titles[i]}')
-        axes[1, i].axis('off')
-        plt.colorbar(im2, ax=axes[1, i], fraction=0.046, pad=0.04)
+        titles = ['t+1', 't+2', 't+3']
+        
+        # 計算統一的顏色範圍 (只考慮有效區域)
+        valid_pred = pred_np[mask_np > 0]
+        valid_target = target_np[mask_np > 0]
+        if len(valid_pred) > 0 and len(valid_target) > 0:
+            all_valid = np.concatenate([valid_pred, valid_target])
+            abs_max = max(abs(np.percentile(all_valid, 1)), abs(np.percentile(all_valid, 99)))
+            abs_max = max(abs_max, 0.01)
+        else:
+            abs_max = 0.1
+        vmin, vmax = -abs_max, abs_max
+        
+        # 使用 RdBu_r: 紅色=正值(水漲), 藍色=負值(水退), 白色=零
+        cmap = 'RdBu_r'
+        
+        for i in range(3):
+            # 應用遮罩
+            pred_masked = np.ma.masked_where(mask_np[i, 0] == 0, pred_np[i, 0])
+            target_masked = np.ma.masked_where(mask_np[i, 0] == 0, target_np[i, 0])
+            
+            # 上排：預測值
+            im1 = axes[0, i].imshow(pred_masked, cmap=cmap, vmin=vmin, vmax=vmax)
+            axes[0, i].set_title(f'Prediction {titles[i]}')
+            axes[0, i].axis('off')
+            cbar1 = plt.colorbar(im1, ax=axes[0, i], fraction=0.046, pad=0.04)
+            cbar1.set_label('m')
+            
+            # 下排：真實值
+            im2 = axes[1, i].imshow(target_masked, cmap=cmap, vmin=vmin, vmax=vmax)
+            axes[1, i].set_title(f'Ground Truth {titles[i]}')
+            axes[1, i].axis('off')
+            cbar2 = plt.colorbar(im2, ax=axes[1, i], fraction=0.046, pad=0.04)
+            cbar2.set_label('m')
+        
+        plt.suptitle(f'Epoch {epoch} - Sample {sample_idx+1}/{n_samples} ({sample_name})', fontsize=14)
+        plt.tight_layout()
+        
+        save_path = os.path.join(save_dir, f'val_epoch_{epoch:03d}_{sample_name}.png')
+        plt.savefig(save_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
     
-    plt.suptitle(f'Epoch {epoch} - Validation Comparison', fontsize=14)
-    plt.tight_layout()
-    
-    save_path = os.path.join(save_dir, f'val_comparison_epoch_{epoch:03d}.png')
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    
-    print(f"  驗證比較圖已保存: {save_path}")
+    print(f"  驗證比較圖已保存: {save_dir}/val_epoch_{epoch:03d}_[first|middle|last].png")
 
 
 def format_time(seconds):
@@ -287,9 +312,11 @@ def train():
         # ==================== 驗證階段 ====================
         model.eval()
         val_loss = 0.0
-        val_pred_for_vis = None
-        val_target_for_vis = None
-        val_mask_for_vis = None
+        
+        # 收集所有驗證資料用於視覺化
+        all_preds = []
+        all_targets = []
+        all_masks = []
         
         # 額外指標追蹤
         val_mae = 0.0
@@ -319,11 +346,10 @@ def train():
                     flood_mse = ((pred - flood_target) ** 2 * flood_mask).sum() / (flood_mask.sum() + 1e-6)
                     val_flood_mse += flood_mse.item()
                 
-                # 保存第一個批次用於視覺化
-                if batch_idx == 0:
-                    val_pred_for_vis = pred
-                    val_target_for_vis = flood_target
-                    val_mask_for_vis = mask
+                # 收集所有 batch 的資料 (移到 CPU 節省 GPU 記憶體)
+                all_preds.append(pred.cpu())
+                all_targets.append(flood_target.cpu())
+                all_masks.append(mask.cpu())
         
         val_loss /= len(val_loader)
         val_mae /= len(val_loader)
@@ -366,12 +392,12 @@ def train():
               f"已訓練: {format_time(elapsed_total)} | "
               f"預估剩餘: {format_time(eta_seconds)}")
         
-        # 每個 epoch 都保存驗證比較圖
-        if val_pred_for_vis is not None:
+        # 每個 epoch 都保存驗證比較圖 (第一筆、中間、最後一筆)
+        if len(all_preds) > 0:
             save_validation_comparison(
-                val_pred_for_vis,
-                val_target_for_vis,
-                val_mask_for_vis,
+                all_preds,
+                all_targets,
+                all_masks,
                 epoch,
                 vis_dir
             )
