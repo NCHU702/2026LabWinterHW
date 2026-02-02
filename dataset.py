@@ -9,8 +9,7 @@ from torch.utils.data import Dataset
 
 重要說明：
 - Flood 資料為累積淹水深度（每個時間點包含之前的淹水）
-- Dataset 會自動計算差值（增量），作為模型的預測目標
-- 目標值 = 當前淹水深度 - 前一時間點淹水深度
+- Dataset 直接使用累積淹水深度作為模型的預測目標
 """
 
 class StochasticRainDataset(Dataset):
@@ -106,17 +105,18 @@ class StochasticRainDataset(Dataset):
     def __getitem__(self, idx):
         rain_paths, flood_paths = self.sequences[idx]
         rain_frames = []
+        rain_norm = self.config.get('rain_normalization', 1.0)
         
         # 1. 過去 6 小時 (觀測)
         for i in range(6):
             grid, _ = self._read_csv(rain_paths[i])
-            rain_frames.append(grid)
+            rain_frames.append(grid/rain_norm) # 正規化
             
         # 2. 未來 3 小時 (預報+擾動)
         # 所有模式都加擾動以模擬預報不確定性
         for i in range(6, 9):
             grid, _ = self._read_csv(rain_paths[i])
-            noisy_grid = self._add_forecast_error(grid)
+            noisy_grid = self._add_forecast_error(grid/rain_norm) # 正規化後加擾動
             rain_frames.append(noisy_grid)
             
         # 3. 讀取 flood 原始資料（累積值）
@@ -128,24 +128,30 @@ class StochasticRainDataset(Dataset):
             flood_raw.append(grid)
             mask_frames.append(mask)
         
-        # 4. 計算差值（增量）作為目標
-        # 注意：原始 flood 資料是累積值，模型需要預測增量
+        # 4. 使用累積淹水深度作為目標
         # flood_raw[0] = t 時刻（基準）
         # flood_raw[1] = t+1, flood_raw[2] = t+2, flood_raw[3] = t+3
         flood_frames = []
-        target_scale = self.config.get('target_scale', 1.0)  # 目標值縮放因子
+        target_scale = self.config.get('target_scale', 1.0)  # 目標值縮放因子（可選）
         for i in range(1, len(flood_raw)):  # 從索引 1 開始（t+1, t+2, t+3）
-            # t+i 的增量 = flood[t+i] - flood[t+(i-1)]
             diff = flood_raw[i] - flood_raw[i-1]
-            # 縮放目標值讓模型更容易學習
             diff = diff * target_scale
             flood_frames.append(diff)
         
         # 只使用後 3 個時刻的 mask（對應 t+1, t+2, t+3）
         mask_frames = mask_frames[1:]
-            
-        # 轉 Tensor
-        input_tensor = torch.from_numpy(np.array(rain_frames)).unsqueeze(1)  # [9, 1, H, W]
+        
+        # === 特徵工程：加入前一時刻淹水深度（t時刻）作為額外輸入通道 ===
+        # flood_raw[0] 是 t 時刻的淹水深度，提供當前狀態信息
+        flood_t0 = flood_raw[0] 
+        # 將淹水深度複製9次，讓每個時間步都能看到初始狀態
+        flood_t0_expanded = np.tile(flood_t0[np.newaxis, :, :], (9, 1, 1))  # [9, H, W]
+        
+        # 轉 Tensor：拼接 [降雨, 前一時刻淹水深度] 作為2通道輸入
+        rain_tensor = torch.from_numpy(np.array(rain_frames))  # [9, H, W]
+        flood_init_tensor = torch.from_numpy(flood_t0_expanded)  # [9, H, W]
+        input_tensor = torch.stack([rain_tensor, flood_init_tensor], dim=1)  # [9, 2, H, W]
+        
         target_tensor = torch.from_numpy(np.array(flood_frames)).unsqueeze(1)  # [3, 1, H, W]
         mask_tensor = torch.from_numpy(np.array(mask_frames)).unsqueeze(1)  # [3, 1, H, W]
         
@@ -174,6 +180,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap
     import os
+    os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
     
     # 設定中文字體
     plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS']
@@ -199,18 +206,20 @@ if __name__ == "__main__":
     
     print(f"✅ Dataset 大小: {len(train_dataset)} 組序列")
     
+    
     # 3. 測試讀取第一筆資料
     print("\n[3] 測試讀取第 0 筆資料...")
     try:
         input_data, target_data, mask_data = train_dataset[0]
         
-        print(f"✅ 輸入 (降雨) 維度: {input_data.shape}")
-        print(f"   - 應為 [9, 1, H, W]: 9 個時間步，1 通道")
-        print(f"   - 降雨範圍: [{input_data.min():.2f}, {input_data.max():.2f}]")
+        print(f"✅ 輸入 (雨+淹水) 維度: {input_data.shape}")
+        print(f"   - 應為 [9, 2, H, W]: 9 個時間步，2 通道 (降雨 + 初始淹水深度)")
+        print(f"   - 降雨通道範圍: [{input_data[:, 0].min():.2f}, {input_data[:, 0].max():.2f}]")
+        print(f"   - 淹水通道範圍: [{input_data[:, 1].min():.2f}, {input_data[:, 1].max():.2f}]")
         
         print(f"✅ 目標 (淹水增量) 維度: {target_data.shape}")
         print(f"   - 應為 [3, 1, H, W]: 3 個時間步，1 通道")
-        print(f"   - 淹水增量範圍: [{target_data.min():.2f}, {target_data.max():.2f}] (可能有負值)")
+        print(f"   - 淹水增量範圍: [{target_data.min():.2f}, {target_data.max():.2f}]")
         
         print(f"✅ 遮罩維度: {mask_data.shape}")
         print(f"   - 應為 [3, 1, H, W]")
@@ -234,8 +243,8 @@ if __name__ == "__main__":
     
     # 5. 比較訓練/驗證模式的差異
     print("\n[5] 比較訓練/驗證模式 (未來 3 小時部分)...")
-    train_future = input_data[6:9]  # 訓練模式的未來預報
-    val_future = input_val[6:9]     # 驗證模式的未來預報
+    train_future = input_data[6:9, 0]  # 訓練模式的未來預報（降雨通道）
+    val_future = input_val[6:9, 0]     # 驗證模式的未來預報（降雨通道）
     
     diff = torch.abs(train_future - val_future).mean()
     print(f"   - 平均差異: {diff:.4f}")
@@ -314,7 +323,6 @@ if __name__ == "__main__":
     for i in range(3):
         ax = axes[2, i + 1]
         flood_frame = target_data[i, 0].numpy()
-        # 增量可能有負值，使用對稱色階
         vmin = min(flood_frame.min(), 0)
         vmax = flood_frame.max()
         im = ax.imshow(flood_frame, cmap=flood_cmap, vmin=vmin, vmax=vmax)
@@ -440,8 +448,11 @@ if __name__ == "__main__":
     plt.close()
     
     # === 圖 5: 統計分析 ===
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     fig.suptitle('Dataset 統計分析', fontsize=16, fontweight='bold')
+    flood_threshold = CONFIG.get('flood_threshold', 0.005)
+    target_scale = CONFIG.get('target_scale', 1.0)
+    threshold = flood_threshold * target_scale
     
     # 降雨分布 (過去 vs 未來)
     ax = axes[0, 0]
@@ -454,14 +465,24 @@ if __name__ == "__main__":
     ax.legend()
     ax.grid(alpha=0.3)
     
-    # 淹水增量分布
+    # 淹水增量分布(只看threshold以上)
     ax = axes[0, 1]
     flood_all = target_data[:, 0].numpy().flatten()
-    flood_valid = flood_all[np.abs(flood_all) > 0.001]  # 排除接近零的值
+    flood_valid = flood_all[np.abs(flood_all) > threshold]  # 排除接近零的值
     ax.hist(flood_valid, bins=50, color='red', alpha=0.7)
     ax.set_xlabel('淹水增量 (m)', fontsize=10)
     ax.set_ylabel('頻率', fontsize=10)
     ax.set_title(f'淹水增量分布 (含正負值)', fontsize=12)
+    ax.grid(alpha=0.3)
+    
+    # 輸入淹水深度分布
+    ax = axes[0, 2]
+    input_flood = input_data[0, 1].numpy().flatten()
+    input_flood_valid = input_flood[input_flood > threshold]
+    ax.hist(input_flood_valid, bins=50, color='blue', alpha=0.7)
+    ax.set_xlabel('淹水深度 (m)', fontsize=10)
+    ax.set_ylabel('頻率', fontsize=10)
+    ax.set_title(f'輸入淹水深度分布 (t時刻)\nMin: {input_flood.min():.4f}m, Max: {input_flood.max():.4f}m', fontsize=10)
     ax.grid(alpha=0.3)
     
     # 時間序列趨勢
@@ -476,7 +497,7 @@ if __name__ == "__main__":
     ax.grid(alpha=0.3)
     
     # 擾動統計
-    ax = axes[1, 1]
+    ax = axes[1, 2]
     diffs = []
     for i in range(3):
         train_frame = input_data[6 + i, 0].numpy()
@@ -502,3 +523,147 @@ if __name__ == "__main__":
     print("   - perturbation_diff.png: 擾動差異熱圖")
     print("   - flood_with_mask.png: 淹水增量 vs 累積深度 (上下對比)")
     print("   - statistics.png: 統計分析 (含增量分布)")
+    
+    # 計算所有資料的統計分佈
+    print("\n" + "="*70)
+    print("📊 全局統計分佈分析")
+    print("="*70)
+    
+    all_rain = []
+    all_flood_increment = []
+    all_flood_depth = []
+    all_input_flood = []
+    
+    for idx in range(len(train_dataset)):
+        input_seq, target_seq, mask_seq = train_dataset[idx]
+        
+        # 降雨資料：只取最後一個時間步（t-6 預測點，避免重複統計時間序列）
+        rain_last_step = input_seq[0, 0].numpy()  # [H, W]
+        rain_valid = rain_last_step[mask_seq[0, 0].numpy() > 0]  # 只取有效區域
+        if len(rain_valid) > 0:
+            all_rain.extend(rain_valid)
+        
+        # 輸入淹水深度：取t時刻（通道1）
+        input_flood_t0 = input_seq[0, 1].numpy()  # [H, W]
+        input_flood_valid = input_flood_t0[mask_seq[0, 0].numpy() > 0]  # 只取有效區域
+        if len(input_flood_valid) > 0:
+            all_input_flood.extend(input_flood_valid)
+        
+        # 淹水增量資料：只取第一個時間步（t+3，避免重複統計）
+        target_last_step = target_seq[0, 0].numpy()  # [H, W]
+        mask_last_step = mask_seq[0, 0].numpy()  # [H, W]
+        flood_inc_valid = target_last_step[np.abs(target_last_step) > threshold]
+        if len(flood_inc_valid) > 0:
+            all_flood_increment.extend(flood_inc_valid)
+    
+    all_rain = np.array(all_rain)
+    all_flood_increment = np.array(all_flood_increment)
+    all_input_flood = np.array(all_input_flood)
+    
+    if len(all_rain) > 0:
+        print(f"\n🌧️ 降雨量統計:")
+        print(f"   Count: {len(all_rain):,}")
+        print(f"   Mean:  {all_rain.mean():.6f} mm")
+        print(f"   Std:   {all_rain.std():.6f} mm")
+        print(f"   Min:   {all_rain.min():.6f} mm")
+        print(f"   Q25:   {np.percentile(all_rain, 25):.6f} mm")
+        print(f"   Q50:   {np.percentile(all_rain, 50):.6f} mm")
+        print(f"   Q75:   {np.percentile(all_rain, 75):.6f} mm")
+        print(f"   Max:   {all_rain.max():.6f} mm")
+    
+    if len(all_input_flood) > 0:
+        print(f"\n🌊 輸入淹水深度統計 (t時刻):")
+        print(f"   Count: {len(all_input_flood):,}")
+        print(f"   Mean:  {all_input_flood.mean():.6f} m")
+        print(f"   Std:   {all_input_flood.std():.6f} m")
+        print(f"   Min:   {all_input_flood.min():.6f} m")
+        print(f"   Q25:   {np.percentile(all_input_flood, 25):.6f} m")
+        print(f"   Q50:   {np.percentile(all_input_flood, 50):.6f} m")
+        print(f"   Q75:   {np.percentile(all_input_flood, 75):.6f} m")
+        print(f"   Max:   {all_input_flood.max():.6f} m")
+    
+    if len(all_flood_increment) > 0:
+        print(f"\n💧 有效淹水增量統計:")
+        print(f"   Count: {len(all_flood_increment):,}")
+        print(f"   Mean:  {all_flood_increment.mean():.6f} m")
+        print(f"   Std:   {all_flood_increment.std():.6f} m")
+        print(f"   Min:   {all_flood_increment.min():.6f} m")
+        print(f"   Q25:   {np.percentile(all_flood_increment, 25):.6f} m")
+        print(f"   Q50:   {np.percentile(all_flood_increment, 50):.6f} m")
+        print(f"   Q75:   {np.percentile(all_flood_increment, 75):.6f} m")
+        print(f"   Max:   {all_flood_increment.max():.6f} m")
+        
+        # 正負值統計
+        pos_count = (all_flood_increment > 1e-6).sum()
+        neg_count = (all_flood_increment < -1e-6).sum()
+        zero_count = len(all_flood_increment) - pos_count - neg_count
+        
+        print(f"\n   增量符號分布:")
+        print(f"   正值 (水漲):  {pos_count:,} ({pos_count/len(all_flood_increment)*100:.2f}%)")
+        print(f"   零值:        {zero_count:,} ({zero_count/len(all_flood_increment)*100:.2f}%)")
+        print(f"   負值 (水退):  {neg_count:,} ({neg_count/len(all_flood_increment)*100:.2f}%)")
+    
+    print("="*70)
+    
+    # 📈 生成統計圖表
+    print("\n📈 生成統計分佈圖表...")
+    
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.suptitle('全局資料統計分佈', fontsize=16, fontweight='bold')
+    
+    # 1. 降雨量直方圖
+    ax = axes[0, 0]
+    if len(all_rain) > 0:
+        ax.hist(all_rain, bins=100, color='steelblue', alpha=0.7, edgecolor='black')
+        ax.axvline(all_rain.mean(), color='red', linestyle='--', linewidth=2, label=f'Mean: {all_rain.mean():.3f}')
+        ax.axvline(np.median(all_rain), color='orange', linestyle='--', linewidth=2, label=f'Median: {np.median(all_rain):.3f}')
+        ax.set_xlabel('降雨量 (mm)', fontsize=11)
+        ax.set_ylabel('頻率', fontsize=11)
+        ax.set_title('降雨量分佈', fontsize=12, fontweight='bold')
+        ax.legend()
+        ax.grid(alpha=0.3)
+    
+    # 2. 降雨量 對數尺度
+    ax = axes[0, 1]
+    if len(all_rain) > 0:
+        ax.hist(all_rain, bins=100, color='steelblue', alpha=0.7, edgecolor='black')
+        ax.set_xlabel('降雨量 (mm)', fontsize=11)
+        ax.set_ylabel('頻率 (對數)', fontsize=11)
+        ax.set_yscale('log')
+        ax.set_title('降雨量分佈（對數尺度）', fontsize=12, fontweight='bold')
+        ax.grid(alpha=0.3, which='both')
+    
+    # 3. 淹水增量直方圖
+    ax = axes[1, 0]
+    if len(all_flood_increment) > 0:
+        ax.hist(all_flood_increment, bins=100, color='indianred', alpha=0.7, edgecolor='black')
+        ax.axvline(all_flood_increment.mean(), color='blue', linestyle='--', linewidth=2, label=f'Mean: {all_flood_increment.mean():.6f}')
+        ax.axvline(np.median(all_flood_increment), color='green', linestyle='--', linewidth=2, label=f'Median: {np.median(all_flood_increment):.6f}')
+        ax.axvline(0, color='black', linestyle='-', linewidth=1, alpha=0.5)
+        ax.set_xlabel('淹水增量 (m)', fontsize=11)
+        ax.set_ylabel('頻率', fontsize=11)
+        ax.set_title('淹水增量分佈（正=水漲，負=水退）', fontsize=12, fontweight='bold')
+        ax.legend()
+        ax.grid(alpha=0.3)
+    
+    # 4. 淹水增量累積分佈函數 (CDF)
+    ax = axes[1, 1]
+    if len(all_flood_increment) > 0:
+        sorted_data = np.sort(all_flood_increment)
+        cdf = np.arange(1, len(sorted_data) + 1) / len(sorted_data)
+        ax.plot(sorted_data, cdf, linewidth=2, color='purple')
+        ax.axvline(0, color='red', linestyle='--', alpha=0.5, label='Zero crossing')
+        ax.axhline(0.5, color='gray', linestyle=':', alpha=0.5)
+        ax.set_xlabel('淹水增量 (m)', fontsize=11)
+        ax.set_ylabel('累積概率', fontsize=11)
+        ax.set_title('淹水增量累積分佈函數 (CDF)', fontsize=12, fontweight='bold')
+        ax.legend()
+        ax.grid(alpha=0.3)
+    
+    plt.tight_layout()
+    stats_fig_path = os.path.join(vis_dir, 'global_statistics.png')
+    plt.savefig(stats_fig_path, dpi=150, bbox_inches='tight')
+    print(f"   ✅ 統計圖表已儲存: {stats_fig_path}")
+    plt.close()
+    
+    print("\n✅ 統計分析完成！")

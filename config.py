@@ -19,15 +19,18 @@ CONFIG = {
     'batch_size': 2,    # 一個batch差不多4.5GB VRAM
     'learning_rate': 1e-4,
     'weight_decay': 1e-5,
-    'num_epochs': 64,
+    'num_epochs': 40,
     'early_stopping_patience': 10,
     
     # 損失函數參數
-    'flood_weight': 100.0,    # 淹水區域的權重倍數 (越大越關注淹水區)
-    'target_scale': 10.0,    # 目標值縮放因子 (放大目標值讓模型更容易學習)
-    
+    'flood_weight': 100.0,      # 淹水區域的權重倍數
+    'target_scale': 10.0,      # 目標值縮放因子 (1.0 代表使用原始淹水深度)
+    'zero_weight': 10.0,        # 小區域懲罰權重
+    'flood_threshold': 0.005,  # 淹水變化量判定的閾值 (單位: 米)
+
     # 資料處理
     'pad_multiple': 8,       # 尺寸需為 8 的倍數 (3層MaxPool: 2^3=8)
+    'rain_normalization':42.91049480155245,  # 降雨正規化因子(1.0代表不做正規化)
     
     # 硬體
     'device': torch.device("cuda" if torch.cuda.is_available() else "cpu")

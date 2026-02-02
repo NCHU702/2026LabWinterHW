@@ -3,6 +3,7 @@
 使用 ConvLSTM 進行時序預測
 """
 import os
+os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import time
 import torch
 import torch.nn as nn
@@ -13,6 +14,10 @@ matplotlib.use('Agg')  # Non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 import json
+
+# 設定 matplotlib 支援中文顯示並避免負號字型缺字警告
+plt.rcParams['font.sans-serif'] = ['Microsoft JhengHei', 'SimHei', 'Arial Unicode MS', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
 
 from config import CONFIG
 from dataset import StochasticRainDataset
@@ -47,14 +52,16 @@ def init_weights(m):
         nn.init.constant_(m.bias, 0)
 
 
-def save_validation_comparison(all_preds, all_targets, all_masks, epoch, save_dir):
+def save_validation_comparison(all_preds, all_targets, all_masks, all_inputs, epoch, save_dir):
     """
     保存驗證階段的預測與真實值比較圖 (第一筆、中間、最後一筆)
+    包含輸入降雨序列與輸入淹水圖
     
     Args:
         all_preds: 所有預測值列表，每個元素 [B, 3, 1, H, W]
         all_targets: 所有真實值列表
         all_masks: 所有遮罩列表
+        all_inputs: 所有輸入列表 [B, 9, 2, H, W] (2通道: 降雨+初始淹水)
         epoch: 當前 epoch
         save_dir: 保存目錄
     """
@@ -64,6 +71,7 @@ def save_validation_comparison(all_preds, all_targets, all_masks, epoch, save_di
     preds = torch.cat(all_preds, dim=0)    # [N, 3, 1, H, W]
     targets = torch.cat(all_targets, dim=0)
     masks = torch.cat(all_masks, dim=0)
+    inputs = torch.cat(all_inputs, dim=0)  # [N, 9, 2, H, W]
     
     n_samples = preds.shape[0]
     
@@ -79,46 +87,84 @@ def save_validation_comparison(all_preds, all_targets, all_masks, epoch, save_di
         pred_np = preds[sample_idx].detach().cpu().numpy() / target_scale      # [3, 1, H, W]
         target_np = targets[sample_idx].detach().cpu().numpy() / target_scale  # [3, 1, H, W]
         mask_np = masks[sample_idx].detach().cpu().numpy()                     # [3, 1, H, W]
+        input_np = inputs[sample_idx].detach().cpu().numpy()                   # [9, C, H, W]
+        input_rain = input_np[:, 0]                                            # [9, H, W]
+        input_flood = None
+        if input_np.shape[1] > 1:
+            input_flood = input_np[:, 1] / target_scale                        # [9, H, W] 還原淹水縮放
+            input_flood = np.clip(input_flood, 0.0, None)                      # 避免負值影響視覺化
         
-        # 創建 2x3 的圖表：上排預測，下排真實值
-        fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+        # 創建 4x3 的圖表：第一行輸入降雨，第二行輸入淹水，第三行預測增量，第四行真實增量
+        fig, axes = plt.subplots(4, 3, figsize=(15, 16))
         
         titles = ['t+1', 't+2', 't+3']
         
-        # 計算統一的顏色範圍 (只考慮有效區域)
+        # 計算統一的顏色範圍 (淹水增量，可能有正負值)
         valid_pred = pred_np[mask_np > 0]
         valid_target = target_np[mask_np > 0]
         if len(valid_pred) > 0 and len(valid_target) > 0:
             all_valid = np.concatenate([valid_pred, valid_target])
+            # 使用對稱範圍：取 1% 和 99% 百分位數
             abs_max = max(abs(np.percentile(all_valid, 1)), abs(np.percentile(all_valid, 99)))
-            abs_max = max(abs_max, 0.01)
+            flood_vmax = max(abs_max, 0.01)
         else:
-            abs_max = 0.1
-        vmin, vmax = -abs_max, abs_max
+            flood_vmax = 0.1
+        flood_vmin = -flood_vmax  # 對稱範圍
         
-        # 使用 RdBu_r: 紅色=正值(水漲), 藍色=負值(水退), 白色=零
-        cmap = 'RdBu_r'
+        # 降雨的色彩範圍
+        rain_vmax = np.percentile(input_rain[6:9], 95)  # 未來 3 小時的雨量
+        rain_vmin = 0.0
         
+        # 第一行：輸入序列 (未來 3 小時的預報降雨，t+1, t+2, t+3)
         for i in range(3):
-            # 應用遮罩
-            pred_masked = np.ma.masked_where(mask_np[i, 0] == 0, pred_np[i, 0])
-            target_masked = np.ma.masked_where(mask_np[i, 0] == 0, target_np[i, 0])
-            
-            # 上排：預測值
-            im1 = axes[0, i].imshow(pred_masked, cmap=cmap, vmin=vmin, vmax=vmax)
-            axes[0, i].set_title(f'Prediction {titles[i]}')
-            axes[0, i].axis('off')
-            cbar1 = plt.colorbar(im1, ax=axes[0, i], fraction=0.046, pad=0.04)
-            cbar1.set_label('m')
-            
-            # 下排：真實值
-            im2 = axes[1, i].imshow(target_masked, cmap=cmap, vmin=vmin, vmax=vmax)
-            axes[1, i].set_title(f'Ground Truth {titles[i]}')
-            axes[1, i].axis('off')
-            cbar2 = plt.colorbar(im2, ax=axes[1, i], fraction=0.046, pad=0.04)
-            cbar2.set_label('m')
+            ax = axes[0, i]
+            rain_frame = input_rain[6 + i]  # 未來 3 小時的降雨
+            # 應用遮罩於輸入
+            rain_masked = np.ma.masked_where(mask_np[i, 0] == 0, rain_frame)
+            im = ax.imshow(rain_masked, cmap='Blues', vmin=rain_vmin, vmax=rain_vmax)
+            ax.set_title(f'Rain Input {titles[i]} (mm/hr)', fontweight='bold')
+            ax.axis('off')
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('mm/hr')
+
+        # 第二行：輸入淹水圖 (使用 t 時刻狀態，顯示在 t+1, t+2, t+3 欄位)
+        if input_flood is not None:
+            flood_input_vmax = max(np.percentile(input_flood, 95), 1e-6)
+            for i in range(3):
+                ax = axes[1, i]
+                flood_frame = input_flood[0]  # t 時刻淹水狀態
+                flood_masked = np.ma.masked_where(mask_np[i, 0] == 0, flood_frame)
+                im = ax.imshow(flood_masked, cmap='Blues', vmin = 0, vmax=flood_input_vmax)
+                ax.set_title(f'Flood Input t (m)', fontweight='bold')
+                ax.axis('off')
+                cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                cbar.set_label('m')
+        else:
+            for i in range(3):
+                axes[1, i].axis('off')
+                axes[1, i].set_title('Flood Input (N/A)', fontweight='bold')
         
-        plt.suptitle(f'Epoch {epoch} - Sample {sample_idx+1}/{n_samples} ({sample_name})', fontsize=14)
+        # 第三行：預測值
+        for i in range(3):
+            ax = axes[2, i]
+            pred_masked = np.ma.masked_where(mask_np[i, 0] == 0, pred_np[i, 0])
+            im = ax.imshow(pred_masked, cmap='RdBu_r', vmin=flood_vmin, vmax=flood_vmax)
+            ax.set_title(f'Prediction Δh {titles[i]} (m)', fontweight='bold')
+            ax.axis('off')
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('m')
+        
+        # 第四行：真實值
+        for i in range(3):
+            ax = axes[3, i]
+            target_masked = np.ma.masked_where(mask_np[i, 0] == 0, target_np[i, 0])
+            im = ax.imshow(target_masked, cmap='RdBu_r', vmin=flood_vmin, vmax=flood_vmax)
+            ax.set_title(f'Ground Truth Δh {titles[i]} (m)', fontweight='bold')
+            ax.axis('off')
+            cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label('m')
+        
+        plt.suptitle(f'Epoch {epoch} - Sample {sample_idx+1}/{n_samples} ({sample_name})', fontsize=14, fontweight='bold')
         plt.tight_layout()
         
         save_path = os.path.join(save_dir, f'val_epoch_{epoch:03d}_{sample_name}.png')
@@ -293,7 +339,17 @@ def train():
             
             with torch.amp.autocast('cuda'):
                 pred = model(rain_input)
-                loss = weighted_flood_loss(pred, flood_target, mask, flood_weight=flood_weight)
+                target_scale = CONFIG.get('target_scale', 1.0)
+                zero_weight = CONFIG.get('zero_weight', 0.0)
+                loss = weighted_flood_loss(
+                    pred,
+                    flood_target,
+                    mask,
+                    flood_weight=flood_weight,
+                    flood_threshold=CONFIG.get('flood_threshold', 0.005),
+                    target_scale=target_scale,
+                    zero_weight=zero_weight
+                )
             
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -317,6 +373,7 @@ def train():
         all_preds = []
         all_targets = []
         all_masks = []
+        all_inputs = []
         
         # 額外指標追蹤
         val_mae = 0.0
@@ -330,7 +387,18 @@ def train():
                 
                 with torch.amp.autocast('cuda'):
                     pred = model(rain_input)
-                    loss = weighted_flood_loss(pred, flood_target, mask, flood_weight=flood_weight)
+                    target_scale = CONFIG.get('target_scale', 1.0)
+                    zero_weight = CONFIG.get('zero_weight', 0.0)
+                    loss = weighted_flood_loss(
+                        pred,
+                        flood_target,
+                        mask,
+                        flood_weight=flood_weight,
+                        flood_threshold=CONFIG.get('flood_threshold', 0.005),
+                        target_scale=target_scale,
+                        zero_weight=zero_weight,
+
+                    )
                 
                 val_loss += loss.item()
                 
@@ -340,7 +408,7 @@ def train():
                 
                 # 計算淹水區域 MSE (閾值需要配合 target_scale)
                 target_scale = CONFIG.get('target_scale', 1.0)
-                flood_threshold = 0.001 * target_scale  # 縮放後的閾值
+                flood_threshold = CONFIG.get('flood_threshold', 0.005) * target_scale  # 縮放後的閾值
                 flood_mask = (torch.abs(flood_target) > flood_threshold).float() * mask
                 if flood_mask.sum() > 0:
                     flood_mse = ((pred - flood_target) ** 2 * flood_mask).sum() / (flood_mask.sum() + 1e-6)
@@ -350,6 +418,7 @@ def train():
                 all_preds.append(pred.cpu())
                 all_targets.append(flood_target.cpu())
                 all_masks.append(mask.cpu())
+                all_inputs.append(rain_input.cpu())
         
         val_loss /= len(val_loader)
         val_mae /= len(val_loader)
@@ -386,6 +455,7 @@ def train():
         # 輸出訓練資訊
         print(f"\nEpoch {epoch}/{epochs}")
         print(f"  Train Loss: {train_loss:.6f}")
+        
         print(f"  Val Loss:   {val_loss:.6f} | MAE: {val_mae:.6f} | Flood MSE: {val_flood_mse:.6f}")
         print(f"  LR: {current_lr:.2e}")
         print(f"  Epoch 耗時: {format_time(epoch_time)} | "
@@ -398,6 +468,7 @@ def train():
                 all_preds,
                 all_targets,
                 all_masks,
+                all_inputs,
                 epoch,
                 vis_dir
             )

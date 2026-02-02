@@ -88,9 +88,17 @@ def masked_mse_loss(pred, target, mask):
     return loss
 
 
-def weighted_flood_loss(pred, target, mask, flood_weight=10.0, threshold=0.01):
+def weighted_flood_loss(
+    pred,
+    target,
+    mask,
+    flood_weight=10.0,
+    flood_threshold=0.005,
+    target_scale=1.0,
+    zero_weight=0.0
+):
     """
-    加權損失函數：對有淹水變化的區域給予更高權重
+    加權損失函數：對有淹水深度的區域給予更高權重
     
     改進版本：
     1. 根據淹水強度動態調整權重 (淹水越嚴重權重越高)
@@ -98,11 +106,11 @@ def weighted_flood_loss(pred, target, mask, flood_weight=10.0, threshold=0.01):
     
     Args:
         pred: 預測值
-        target: 目標值 (淹水增量)
+        target: 目標值 (淹水深度)
         mask: 有效區域遮罩
         flood_weight: 淹水區域的基礎權重倍數
         threshold: 判定有淹水變化的閾值
-    
+        target_scale: 目標值縮放因子
     Returns:
         加權 MSE 損失
     """
@@ -111,25 +119,33 @@ def weighted_flood_loss(pred, target, mask, flood_weight=10.0, threshold=0.01):
     squared_err = diff ** 2
     
     # 動態權重：基於目標值的絕對值
-    # 有變化的區域權重 = 1 + (flood_weight - 1) * sigmoid(|target| * scale)
-    # 這樣淹水越嚴重，權重越高
-    abs_target = torch.abs(target)
-    
+    # 淹水越嚴重，權重越高
     # 基礎權重為 1，有變化的區域提升權重
+    threshold = flood_threshold * target_scale
+    abs_target = torch.abs(target)
     significant_change = (abs_target > threshold).float()
     
     # 強度權重：淹水越多權重越高 (0.1m 的變化比 0.01m 更重要)
-    intensity_weight = 1.0 + abs_target * 10.0  # 0.1m -> 2x, 0.2m -> 3x
+    intensity_weight = 1.0 + abs_target * 100.0 
     
     # 總權重 = 基礎權重 + 淹水權重 * 強度
     weight = torch.ones_like(target)
     weight = weight + (flood_weight - 1.0) * significant_change * intensity_weight
-    
+
     # 應用遮罩和權重
     weighted_err = squared_err * mask * weight
     total_weight = (mask * weight).sum() + 1e-6
     
     loss = weighted_err.sum() / total_weight
+
+    # 試圖避免模型偷懶小區域都預測極值
+    if zero_weight > 0.0:
+        # 區域遮罩
+        zero_mask = (abs_target <= threshold).float()
+        zero_penalty = (diff ** 2) * mask * zero_mask
+        zero_loss = zero_penalty.sum() / ((mask * zero_mask).sum() + 1e-6)
+        loss = loss + zero_weight * zero_loss
+    
     return loss
 
 

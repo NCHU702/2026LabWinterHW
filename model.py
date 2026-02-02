@@ -92,24 +92,28 @@ class ConvLSTMCell(nn.Module):
         )
 
 class HydroNetRainOnly(nn.Module):
-    def __init__(self, output_steps=3):
+    def __init__(self, output_steps=3, input_channels=2):
         super(HydroNetRainOnly, self).__init__()
         self.output_steps = output_steps  # 預測未來 3 個時間步
         
         # Encoder Layer 1: Conv -> LeakyReLU -> ConvLSTM -> MaxPool
-        self.conv1 = nn.Conv2d(1, 16, 3, padding=1)
+        # 改為支援多通道輸入（降雨 + 前一時刻淹水深度）
+        self.conv1 = nn.Conv2d(input_channels, 16, 3, padding=1)
+        self.gn1 = nn.GroupNorm(1, 16)
         self.act1 = nn.LeakyReLU(0.2)
         self.lstm1 = ConvLSTMCell(16, 16, 3, True)
         self.pool1 = nn.MaxPool2d(2)
         
         # Encoder Layer 2: Conv -> LeakyReLU -> ConvLSTM -> MaxPool
         self.conv2 = nn.Conv2d(16, 32, 3, padding=1)
+        self.gn2 = nn.GroupNorm(1, 32)
         self.act2 = nn.LeakyReLU(0.2)
         self.lstm2 = ConvLSTMCell(32, 32, 3, True)
         self.pool2 = nn.MaxPool2d(2)
         
         # Encoder Layer 3: Conv -> LeakyReLU -> ConvLSTM -> MaxPool
         self.conv3 = nn.Conv2d(32, 64, 3, padding=1)
+        self.gn3 = nn.GroupNorm(1, 64)
         self.act3 = nn.LeakyReLU(0.2)
         self.lstm3 = ConvLSTMCell(64, 64, 3, True)
         self.pool3 = nn.MaxPool2d(2)
@@ -144,24 +148,24 @@ class HydroNetRainOnly(nn.Module):
         # 逐時間步處理，信息流經所有層
         for t in range(seq):
             # ===== Encoder Layer 1 =====
-            # Conv -> LeakyReLU
-            conv_out1 = self.act1(self.conv1(x[:, t]))
+            # Conv -> ReLU
+            conv_out1 = self.act1(self.gn1(self.conv1(x[:, t])))
             # ConvLSTM - 更新狀態
             h1, c1 = self.lstm1(conv_out1, (h1, c1))
             # MaxPool
             pooled1 = self.pool1(h1)  # (b, 16, h//2, w//2)
             
             # ===== Encoder Layer 2 =====
-            # Conv -> LeakyReLU (使用 Layer 1 當前時間步的輸出)
-            conv_out2 = self.act2(self.conv2(pooled1))
+            # Conv -> ReLU (使用 Layer 1 當前時間步的輸出)
+            conv_out2 = self.act2(self.gn2(self.conv2(pooled1)))
             # ConvLSTM - 更新狀態
             h2, c2 = self.lstm2(conv_out2, (h2, c2))
             # MaxPool
             pooled2 = self.pool2(h2)  # (b, 32, h//4, w//4)
             
             # ===== Encoder Layer 3 =====
-            # Conv -> LeakyReLU (使用 Layer 2 當前時間步的輸出)
-            conv_out3 = self.act3(self.conv3(pooled2))
+            # Conv -> ReLU (使用 Layer 2 當前時間步的輸出)
+            conv_out3 = self.act3(self.gn3(self.conv3(pooled2)))
             # ConvLSTM - 更新狀態
             h3, c3 = self.lstm3(conv_out3, (h3, c3))
             # MaxPool
@@ -309,7 +313,7 @@ if __name__ == "__main__":
     print("  繪製輸入降雨序列...")
     for t in range(9):
         ax = plt.subplot(5, 9, t + 1)
-        rain_img = test_input[sample_idx, t, 0].numpy()
+        rain_img = test_input[sample_idx, t, 0].numpy()  # 取降雨通道
         
         # 動態調整範圍
         vmin, vmax = rain_img.min(), rain_img.max()
@@ -381,7 +385,7 @@ if __name__ == "__main__":
     
     # 第4行：降雨時序變化圖 (跨3列)
     ax_rain = plt.subplot(5, 3, 13)
-    rain_avg = [test_input[sample_idx, t, 0].mean().item() for t in range(9)]
+    rain_avg = [test_input[sample_idx, t, 0].mean().item() for t in range(9)]  # 取降雨通道
     time_labels = [f't-{5-i}' if i < 6 else f't+{i-5}' for i in range(9)]
     colors = ['blue'] * 6 + ['red'] * 3
     ax_rain.bar(range(9), rain_avg, color=colors, alpha=0.6)
@@ -439,10 +443,11 @@ if __name__ == "__main__":
     ax_arch.axis('off')
     arch_text = """模型架構摘要
 ━━━━━━━━━━━━━━━
-輸入: (B, 9, 1, H, W)
+輸入: (B, 9, 2, H, W)
+  [雨量 + 初始淹水]
 
 Encoder Layer 1:
-  Conv 1→16 → LSTM → Pool
+  Conv 2→16 → LSTM → Pool
 
 Encoder Layer 2:
   Conv 16→32 → LSTM → Pool
@@ -478,7 +483,7 @@ Decoder (×3):
     
     for h, w in test_sizes:
         try:
-            test_input_size = torch.randn(1, 9, 1, h, w)
+            test_input_size = torch.randn(1, 9, 2, h, w)
             with torch.no_grad():
                 output_size = model(test_input_size)
             expected = (1, 3, 1, h, w)
